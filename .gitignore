@@ -1,0 +1,17 @@
+# Build output and Python leftovers
+/build/
+/dist/
+__pycache__/
+*.py[cod]
+*.spec
+
+# Local build helpers (machine-specific; the same commands are in docs/BUILD.md)
+/build-windows.bat
+/build-linux.sh
+/build-mac.sh
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
