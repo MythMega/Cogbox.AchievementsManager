@@ -11,6 +11,11 @@ This project is not affiliated with any gears of war compagny, the coalition, or
 ## USE IT AT YOUR OWN RISK
 (later, i will put something to backup files before and manage backup)
 
+## Download
+You can download it [here](https://github.com/MythMega/Cogbox.AchievementsManager/releases)
+If you want the exe windows version, take the "**CogboxAcMa-Windows-0.1.zip**"
+If you want the python version (for other platforms or to build it yourself), download **source code** and use either the py script, or the sh/bat depending on your need
+
 ## What the tool does
 
 Screen 1 — **Games**: Displays a card for each game found in the COGBox folder (showing the cover art, unlocked achievements, Gamerscore, playtime, and last launch date). This screen only appears for games that actually have content stored in the folder (such as extracted data, a profile, or an achievement catalog).
