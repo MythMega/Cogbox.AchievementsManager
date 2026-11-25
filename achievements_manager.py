@@ -519,12 +519,17 @@ def looks_like_cogbox(path):
 
 # ---------------------------------------------------------------- réglages (dossier COGBox retenu)
 
+def _script_or_exe_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 def config_path():
-    base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
-    return Path(base) / "AchievementsManager" / "settings.ini"
+    return _script_or_exe_dir() / "AppData" / "Roaming" / "JMD" / "AchievementsManager" / "settings.ini"
 
 
-def remember_root(root):
+def save_remembered_root(root):
     path = config_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -545,29 +550,43 @@ def remembered_root():
 
 
 def find_root(explicit=None):
-    candidates = []
+    """Retourne (root_dir, should_save).
+
+    Ordre :
+      1. Argument --root
+      2. Dossier courant de l'exe / du script
+      3. Fichier settings.ini
+    should_save est True uniquement si l'étape 1 ou l'étape 2 a réussi.
+    """
+    # 1. Argument --root
     if explicit:
-        candidates.append(Path(explicit))
-    env = os.environ.get("COGBOX_ROOT")
-    if env:
-        candidates.append(Path(env))
+        p = Path(explicit)
+        try:
+            if looks_like_cogbox(p):
+                return p.resolve(), True
+        except OSError:
+            pass
+
+    # 2. Dossier de l'exe / du script
+    here = _script_or_exe_dir()
+    try:
+        if looks_like_cogbox(here):
+            return here.resolve(), True
+    except OSError:
+        pass
+
+    # 3. Fichier settings.ini
     saved = remembered_root()
     if saved:
-        candidates.append(saved)
-    if getattr(sys, "frozen", False):
-        here = Path(sys.executable).resolve().parent
-    else:
-        here = Path(__file__).resolve().parent
-    candidates.append(here)
-    candidates.extend(here.parents[1:5])
-    candidates.append(Path.cwd())
-    for c in candidates:
         try:
-            if looks_like_cogbox(c):
-                return c.resolve()
+            if looks_like_cogbox(saved):
+                return saved.resolve(), False
         except OSError:
-            continue
-    return candidates[0].resolve() if candidates else Path.cwd()
+            pass
+
+    if explicit:
+        return Path(explicit).resolve(), False
+    return here.resolve(), False
 
 
 def ini_language(ini):
@@ -710,7 +729,7 @@ class App:
             self.status.config(text=i18n.t("folder_invalid", path=path))
             return
         self.root_dir = path.resolve()
-        remember_root(self.root_dir)
+        save_remembered_root(self.root_dir)
         self.head_path.config(text=str(self.root_dir))
         self.reload()
 
@@ -1355,16 +1374,17 @@ def main(argv=None):
             pass
 
     ap = argparse.ArgumentParser(description="Achievements and play time editor for COGBox")
-    ap.add_argument("--root", help="COGBox folder (default: last used, then the exe folder)")
+    ap.add_argument("--root", help="COGBox folder (default: exe/script folder, then settings.ini)")
     ap.add_argument("--selftest", action="store_true", help="check the files without opening the window")
     ap.add_argument("--autoclose", type=float, help="close the window after N seconds (test)")
     args = ap.parse_args(argv)
 
-    root_dir = find_root(args.root)
+    root_dir, should_save = find_root(args.root)
     if args.selftest:
         i18n.set_language(ini_language(CogBoxIni(root_dir / INI_NAME)))
         return selftest(root_dir)
-    remember_root(root_dir)
+    if should_save:
+        save_remembered_root(root_dir)
 
     try:
         App(root_dir).run(autoclose=args.autoclose)
