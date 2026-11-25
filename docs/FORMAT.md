@@ -40,6 +40,11 @@ TitleIDs : Gears 1 `4D5307D5`, Gears 2 `4D53082D`, Gears 3 `4D5308AB`, Judgment 
 `<COGBox>\<Jeu>\user\achievements\<TitleID>.toml`. Le runtime ReXGlue le lit au démarrage et le
 réécrit en quittant.
 
+- Depuis COGBox 0.5.0 il y a un dossier par profil : `user` pour le profil 1, `user-p2`, `user-p3`…
+  pour les suivants (`games.cpp`, `game_user_dir_for`). Le profil courant est `[Profiles] Current`
+  de `CogBox.ini` (1 par défaut) : l'outil lit et écrit le `.toml` de ce dossier, et la sauvegarde
+  couvre tous les profils.
+
 ```
 # Achievement unlock state - managed by ReXGlue runtime
 
@@ -99,7 +104,46 @@ Language = fr
   comprend `en`, `fr`, `pt-BR`, `zh-Hans`, `ko`, `pl`, `ru`, `cs`, `hu` ; les autres codes tombent
   sur l'anglais.
 
+## 5. Profils et comptes locaux
+
+- `CogBox.ini` → `[Profiles] Current` (profil utilisé) et `[Profiles] Count` (`front.cpp`).
+- Dossier de sauvegarde du jeu pour le profil N : `<Jeu>\user` (N = 1) ou `<Jeu>\user-pN`
+  (`games.cpp`, `game_user_dir_for`), avec `achievements\<TitleID>.toml` dedans. Le contenu
+  téléchargé (DLC) vit dans `0000000000000000` du profil 1 et est partagé par une jonction.
+- Compte local : `profiles\<id>\identity.json` (`profiles.cpp`, `profile_dir`) — `display_name`,
+  `discriminator`, `xuid`, `uuid`, `token`.
+- Les réglages propres au jeu sont rangés sous `<user>\<TitleID>\profile\<gamertag>\`, donc le
+  gamertag est un nom de dossier. Le patch SDK 124 (GitHub #416 / #424) reprend la sauvegarde la
+  plus récente d'un autre gamertag quand le nom change : renommer un profil ne perd plus ses
+  réglages.
+
+## 6. Succès d'un autre jeu (patch 127, GitHub #439)
+
+Gears 2 demande les succès de Gears 1 (`4D5307D5`) pour débloquer Carmine, RAAM et Kim. Le launcher
+passe `--xam_other_title_achievements "<TitleID>=<chemin>;…"` (`page.cpp`, `env_refresh`) avec, pour
+globaliser, le `.toml` du profil courant des trois autres jeux ; le patch lit ce fichier.
+Conséquence pour cet outil : débloquer un succès de Gears 1 change aussi ce que Gears 2 voit, et
+inversement rien n'est recopié entre les fichiers.
+
+## 7. Sauvegardes de l'outil
+
+`<COGBox>\backups\cogbox-profileinfo-backup-<AAAA-MM-JJ-hh-mm-ss>.zip` (nom modifiable) contient
+`CogBox.ini`, `settings.ini`, `profiles\<id>\identity.json` et tous les `<Jeu>\user` / `user-pN`.
+
+- Ne sont pas pris : `00000002` (DLC), `000B0000` (title update) — comme `zip_skip_dir` du
+  « Back up saves » de COGBox (`main.cpp`) —, ni `0000000000000000`, `0000010000`, `game`,
+  `ini-edits`, `mod-overlay`, `shadercache`, `logs`, `covers`, qui sont du contenu ou des fichiers
+  régénérés. Les liens et jonctions ne sont pas suivis.
+- Le zip s'écrit en `.partial` puis est renommé, comme COGBox.
+- Restauration : les fichiers du zip sont réécrits (pas d'effacement de ce qui a été créé depuis),
+  et toute entrée qui ne correspond à aucun dossier du dossier COGBox est ignorée.
+- Un profil seul se sauvegarde, se restaure et se vide de la même façon, en se limitant à
+  `<Jeu>\user*` (onglet « Données de jeu ») ; le nom du zip porte alors `-<jeu>-<dossier>-`. Le
+  « reset » écrit d'abord `…-before-reset-….zip`, puis supprime les mêmes fichiers que la sauvegarde
+  (le DLC, les liens et `ini-edits` restent).
+
 ## Ce que l'outil ne touche pas
 
-`settings.ini`, `[Hashes]`, `[CodeHashes]`, `[Keys.*]`, `[Profile]`, les sauvegardes, les mods : rien
-n'est modifié en dehors des sections `[PlayTime]` / `[LastPlayed]` et des `.toml` de succès.
+`settings.ini`, `[Hashes]`, `[CodeHashes]`, `[Keys.*]`, `[Profile]`, `[Profiles]`, les sauvegardes,
+les mods : rien n'est modifié en dehors des sections `[PlayTime]` / `[LastPlayed]`, des `.toml` de
+succès, et des zips écrits dans `backups\`.

@@ -9,7 +9,8 @@ This is intended to work with Cogbox 0.6.7+ available [here](https://github.com/
 This project is not affiliated with any gears of war compagny, the coalition, or CogBox.
 
 ## USE IT AT YOUR OWN RISK
-(later, i will put something to backup files before and manage backup)
+
+There is no undo, so make a backup before changing anything: the **Back up…** button does that in one click (see [Backups](#backups)).
 
 ## Download
 You can download it [here](https://github.com/MythMega/Cogbox.AchievementsManager/releases)
@@ -28,9 +29,15 @@ Screen 2 — **Achievements for a specific game**: Includes full-text search (co
 - **✓ Unlocked** → Removes the achievement (marks it as locked).
 - **Date…** → Allows you to manually set the unlock date and time (input format: `DD/MM/YYYY` + `HH:MM:SS`; includes a "Now" button).
 - Top header: **Playtime** (in `H/M/S` format, with a "Reset" option) and **Last Launched** (date + time, with "Now" and "Clear" options).
+- Buttons above the game list: **Back up…**, **Restore…** and **Backups…** (see [Backups](#backups)).
+- Two tabs: **Achievements** (above) and **Game data**, one card per save profile of the game (`user`,
+  `user-p2`…) with its gamertag, file count, size, last change and unlocked achievements, and the same
+  three actions for that profile alone: **Back up…**, **Restore…** (only that profile's files, with the
+  same "also back up" box) and **Reset…** (a backup is written first, then its save files are deleted;
+  the achievements of that profile go with them).
 
 IMPORTANT :
-All changes are applied immediately without a confirmation prompt; files are rewritten atomically (written to a temporary file, then renamed).
+Every change asks for confirmation first (unlock, lock, a date, play time, last launch, a backup, a restore); files are rewritten atomically (written to a temporary file, then renamed).
 
 ## Data read and written
 
@@ -42,9 +49,34 @@ All changes are applied immediately without a confirmation prompt; files are rew
 | Playtime | `<COGBox>\CogBox.ini` → `[PlayTime] <game> = <seconds>` | cumulative seconds |
 | Last launched | `<COGBox>\CogBox.ini` → `[LastPlayed] <game> = <unix>` | Unix seconds |
 | COGBox language (read-only) | `<COGBox>\CogBox.ini` → `[Launcher] Language = <code>` | `en`, `fr`, `pt-BR`, `zh-Hans`, `ko`, `pl`, `ru`, `hu`, `auto`… |
+| Saves folder, per profile | `<COGBox>\<Game>\user` (profile 1), `user-p2`, `user-p3`… | the current one is `[Profiles] Current` in `CogBox.ini` |
+| Local profiles (read-only) | `<COGBox>\profiles\<id>\identity.json` | gamertag, discriminator, xuid |
+| Backups made by this tool | `<COGBox>\backups\*.zip` | `CogBox.ini`, `settings.ini`, `profiles`, every `<Game>\user*` |
 
 The game keys are those used by COGBox: `gears1`, `gears2`, `gears3`, `judgment`.
 For format details and source code references, see: [docs/FORMAT.md](docs/FORMAT.md).
+
+## Backups
+
+Three buttons above the game list work on everything COGBox keeps for you:
+
+- **Back up…** writes one zip into `<COGBox>\backups\`, named
+  `cogbox-profileinfo-backup-YYYY-MM-DD-hh-mm-ss.zip` by default; the dialog lets you change the name.
+- **Restore…** lists the zips of that folder and puts one back. **Also back up the current files first**
+  (ticked by default) writes a new zip of what is on disk before anything is overwritten.
+- **Backups…** is the same list without the restore button, to look at what each zip holds.
+
+A zip holds `CogBox.ini`, `settings.ini`, `profiles\<id>\identity.json` and every `<Game>\user`,
+`user-p2`… folder (saves, plus the achievements `.toml` files). The content folders are left out,
+because they are hundreds of megabytes of downloaded DLC and rebuilt files: `00000002`, `000B0000`,
+`0000000000000000`, `0000010000`, `game`, `ini-edits`, `mod-overlay`, `shadercache`, `logs`, `covers`.
+Links and junctions are not followed.
+
+The preview of the selected zip shows its date, size and file count, the local profiles (name and
+discriminator), and for each game the achievements unlocked in it, the play time and the last launch.
+
+Restoring overwrites the files the zip holds; files created since the backup are not deleted, and
+entries that match no folder of the COGBox folder are ignored. Close COGBox and the game first.
 
 ## Interface Language
 

@@ -1,4 +1,5 @@
 import argparse
+import backup
 import i18n
 import os
 import sys
@@ -130,7 +131,10 @@ class CogBoxIni:
             self.lines, self.error = [], str(exc)
             return self
         self.error = ""
-        text = raw.decode("utf-8", "replace")
+        return self.set_text(raw.decode("utf-8", "replace"))
+
+    def set_text(self, text):
+        """Charge depuis une chaîne (un CogBox.ini lu dans un zip, par exemple)."""
         if text.startswith("\ufeff"):
             text = text[1:]
         self.crlf = "\r\n" in text
@@ -142,13 +146,20 @@ class CogBoxIni:
             self.lines.pop()
         return self
 
+    @classmethod
+    def from_text(cls, text):
+        ini = cls.__new__(cls)
+        ini.path = None
+        ini.lines, ini.crlf, ini.error = [], True, ""
+        return ini.set_text(text)
+
     @property
     def exists(self):
-        return self.path.is_file()
+        return bool(self.path and self.path.is_file())
 
     def save(self):
         """Écrit un temporaire puis remplace (jamais de fichier à moitié écrit)."""
-        if not self.lines:
+        if not self.lines or self.path is None:
             return False
         out = "".join(l + "\r\n" for l in self.lines)
         try:
@@ -203,6 +214,21 @@ class CogBoxIni:
             return int(value.strip(), 10)
         except ValueError:
             return default
+
+    def items(self, section):
+        """{clé: valeur} d'une section, clés telles qu'écrites."""
+        found, current = {}, ""
+        for line in self.lines:
+            name = self._section(line)
+            if name is not None:
+                current = name
+                continue
+            if current.lower() != section.lower():
+                continue
+            kv = self._kv(line)
+            if kv:
+                found[kv[0]] = kv[1]
+        return found
 
     def set(self, section, key, value):
         """Même règle que Ini::set : remplace la ligne, sinon insère en fin de section."""
@@ -408,7 +434,19 @@ class Game:
         self.last_played = 0
         self.catalog_path = root / "achievements" / title_id / "catalog.txt"
         self.icon_dir = root / "achievements" / title_id / "icons"
-        self.unlock_path = root / folder / "user" / "achievements" / (title_id + ".toml")
+        # 0.5.0 : un dossier de sauvegarde par profil (user, user-p2, user-p3...)
+        self.user_dirs = backup.user_dirs_of(root / folder)
+        self.user_dir = self._profile_dir()
+        self.unlock_path = self.user_dir / "achievements" / (title_id + ".toml")
+
+    def _profile_dir(self):
+        """Dossier du profil courant de COGBox ([Profiles] Current), user s'il n'existe pas encore."""
+        profile = max(1, self.ini.geti64("Profiles", "Current", 1)) if self.ini is not None else 1
+        want = "user" if profile == 1 else "user-p%d" % profile
+        for d in self.user_dirs:
+            if d.name.lower() == want:
+                return d
+        return self.root / self.folder / want
 
     def load(self):
         try:
@@ -470,11 +508,10 @@ class Game:
 
 
 def _has_content(folder):
-    """Le dossier du jeu contient-il quelque chose (données de jeu ou profil) ?"""
+    """Le dossier du jeu contient-il quelque chose (données de jeu ou un profil) ?"""
     if not folder.is_dir():
         return False
-    for sub in ("game", "user"):
-        d = folder / sub
+    for d in [folder / "game"] + backup.user_dirs_of(folder):
         if d.is_dir():
             try:
                 if any(d.iterdir()):
@@ -501,12 +538,14 @@ def discover_games(root, ini=None):
     for d in subdirs:
         if d.name.lower() in seen or d.name.startswith((".", "_")):
             continue
-        adir = d / "user" / "achievements"
-        if not adir.is_dir():
-            continue
-        for toml in sorted(adir.glob("*.toml")):
-            games.append(Game(root, d.name, toml.stem.upper(), d.name, "", ini))
-            break
+        for udir in backup.user_dirs_of(d):
+            adir = udir / "achievements"
+            if not adir.is_dir():
+                continue
+            tomls = sorted(adir.glob("*.toml"))
+            if tomls:
+                games.append(Game(root, d.name, tomls[0].stem.upper(), d.name, "", ini))
+                break
     return games
 
 
@@ -638,6 +677,7 @@ class App:
         self.filter_mode = "all"
         self.query = ""
         self.screen = "games"
+        self.tab = "achievements"
 
         self.scale = dpi_scale()
         self.win = tk.Tk()
@@ -695,6 +735,12 @@ class App:
                                     activebackground=CARD_SEL, activeforeground=TEXT, bd=0)
         self.btn_folder.pack(side="right", padx=(0, 8))
 
+        self.tools = tk.Frame(self.win, bg=BG, padx=22)
+        self.tools.pack(fill="x", pady=(0, 10))
+        self.btn_backup = self._tool_button("head_backup", self._backup_dialog)
+        self.btn_restore = self._tool_button("head_restore", lambda: self._backups_dialog(True))
+        self.btn_backups = self._tool_button("head_backups", lambda: self._backups_dialog(False))
+
         self.body = tk.Frame(self.win, bg=BG, padx=22, pady=0)
         self.body.pack(fill="both", expand=True)
 
@@ -705,6 +751,31 @@ class App:
         self.warn = tk.Label(foot, text=i18n.t("foot_warning"), bg=BG, fg=MUTED, font=self.f_small)
         self.warn.pack(side="right")
 
+    def _tool_button(self, key, command):
+        tk = self.tk
+        button = tk.Button(self.tools, text=i18n.t(key), command=command, bg=PANEL, fg=TEXT,
+                           font=self.f_body, relief="flat", padx=12, pady=4, cursor="hand2",
+                           activebackground=CARD_SEL, activeforeground=TEXT, bd=0)
+        button.pack(side="left", padx=(0, 8))
+        return button
+
+    def _dialog_button(self, parent, key, command, bg=PANEL, fg=TEXT):
+        tk = self.tk
+        return tk.Button(parent, text=i18n.t(key), command=command, bg=bg, fg=fg, font=self.f_body,
+                         relief="flat", padx=12, pady=5, cursor="hand2",
+                         activebackground=ACCENT if bg != PANEL else CARD_SEL,
+                         activeforeground=fg, bd=0)
+
+    def _confirm(self, text):
+        from tkinter import messagebox
+
+        return messagebox.askyesno(i18n.t("confirm_title"), text, parent=self.win)
+
+    def _info(self, title, text):
+        from tkinter import messagebox
+
+        messagebox.showinfo(title, text, parent=self.win)
+
     def _retranslate(self):
         """Relibelle l'en-tête et le pied après un changement de langue (dossier COGBox)."""
         self.win.title(i18n.t("app_title"))
@@ -713,6 +784,9 @@ class App:
         self.head_path.config(font=self.f_small)
         self.btn_reload.config(text=i18n.t("head_reload"), font=self.f_body)
         self.btn_folder.config(text=i18n.t("head_folder"), font=self.f_body)
+        for button, key in ((self.btn_backup, "head_backup"), (self.btn_restore, "head_restore"),
+                            (self.btn_backups, "head_backups")):
+            button.config(text=i18n.t(key), font=self.f_body)
         self.warn.config(text=i18n.t("foot_warning"), font=self.f_small)
         self.status.config(font=self.f_small)
 
@@ -733,6 +807,174 @@ class App:
         self.head_path.config(text=str(self.root_dir))
         self.reload()
 
+    # -- sauvegardes
+    def _backup_dialog(self, only=None, tag=""):
+        """Zip des fichiers de COGBox (``only`` : un profil), nom proposé dans le dossier backups."""
+        tk = self.tk
+        folder = backup.backups_dir(self.root_dir)
+        dlg = tk.Toplevel(self.win)
+        dlg.title(i18n.t("dlg_backup"))
+        dlg.configure(bg=BG, padx=22, pady=18)
+        dlg.transient(self.win)
+        dlg.resizable(False, False)
+        wrap = int(430 * self.scale)
+
+        tk.Label(dlg, text=i18n.t("backup_intro"), bg=BG, fg=TEXT, font=self.f_h2,
+                 wraplength=wrap, justify="left").pack(anchor="w")
+        tk.Label(dlg, text=i18n.t("backup_where", path=folder), bg=BG, fg=MUTED, font=self.f_small,
+                 wraplength=wrap, justify="left").pack(anchor="w", pady=(2, 12))
+
+        tk.Label(dlg, text=i18n.t("field_name"), bg=BG, fg=MUTED, font=self.f_small).pack(anchor="w")
+        name_var = tk.StringVar(value=backup.default_name(tag))
+        entry = tk.Entry(dlg, textvariable=name_var, bg=PANEL, fg=TEXT, insertbackground=TEXT,
+                         relief="flat", font=self.f_body, width=46, bd=0)
+        entry.pack(fill="x", ipady=6, pady=(3, 0))
+        entry.focus_set()
+        entry.select_range(0, "end")
+
+        error = tk.Label(dlg, text="", bg=BG, fg="#f85149", font=self.f_small,
+                         wraplength=wrap, justify="left")
+        error.pack(anchor="w", pady=(8, 0))
+
+        def on_backup():
+            name = name_var.get().strip()
+            if not backup.check_name(name):
+                error.config(text=i18n.t("err_name"))
+                return
+            path = folder / name
+            if path.exists() and not self._confirm(i18n.t("confirm_overwrite", path=path)):
+                return
+            try:
+                files, size = backup.create(self.root_dir, path, only)
+            except Exception as exc:  # disque plein, fichier verrouillé par COGBox...
+                error.config(text=i18n.t("err_backup", err=exc))
+                return
+            dlg.destroy()
+            text = i18n.t("backup_done", path=path, files=files, size=backup.fmt_size(size))
+            self.status.config(text=text)
+            self._info(i18n.t("dlg_backup"), text)
+
+        buttons = tk.Frame(dlg, bg=BG)
+        buttons.pack(pady=(12, 0))
+        self._dialog_button(buttons, "btn_backup", on_backup, ACCENT_DARK, "#ffffff").pack(side="left", padx=(0, 8))
+        self._dialog_button(buttons, "btn_cancel", dlg.destroy).pack(side="left")
+
+        dlg.bind("<Return>", lambda _e: on_backup())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        self._center(dlg)
+
+    def _backups_dialog(self, restore, only=None):
+        """Liste des sauvegardes + aperçu ; en mode restauration, remise en place du zip."""
+        tk = self.tk
+        folder = backup.backups_dir(self.root_dir)
+        items = backup.list_backups(self.root_dir, only)
+        dlg = tk.Toplevel(self.win)
+        dlg.title(i18n.t("dlg_restore" if restore else "dlg_backups"))
+        dlg.configure(bg=BG, padx=22, pady=18)
+        dlg.transient(self.win)
+        dlg.geometry("%dx%d" % (int(820 * self.scale), int(440 * self.scale)))
+        dlg.minsize(int(700 * self.scale), int(360 * self.scale))
+
+        intro = (i18n.t("restore_intro", root=self.root_dir) if restore
+                 else i18n.t("backups_intro", path=folder))
+        tk.Label(dlg, text=intro, bg=BG, fg=TEXT, font=self.f_body,
+                 wraplength=int(760 * self.scale), justify="left").pack(anchor="w", pady=(0, 10))
+
+        body = tk.Frame(dlg, bg=BG)
+        body.pack(fill="both", expand=True)
+        left = tk.Frame(body, bg=BG)
+        left.pack(side="left", fill="both")
+        listbox = tk.Listbox(left, width=36, bg=PANEL, fg=TEXT, selectbackground=CARD_SEL,
+                             selectforeground=TEXT, font=self.f_small, relief="flat", bd=0,
+                             highlightthickness=0, activestyle="none", exportselection=False)
+        scroll = tk.Scrollbar(left, orient="vertical", command=listbox.yview)
+        listbox.config(yscrollcommand=scroll.set)
+        listbox.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        for item in items:
+            listbox.insert("end", "%s  ·  %s" % (item.name, backup.fmt_size(item.size)))
+
+        preview = tk.Frame(body, bg=BG, padx=18)
+        preview.pack(side="left", fill="both", expand=True)
+
+        def show(_event=None):
+            for child in preview.winfo_children():
+                child.destroy()
+            wrap = int(380 * self.scale)
+            sel = listbox.curselection()
+            if not items or not sel:
+                tk.Label(preview, text=i18n.t("backups_empty", path=folder), bg=BG, fg=MUTED,
+                         font=self.f_body, wraplength=wrap, justify="left").pack(anchor="w")
+                return
+            item = items[sel[0]].load()
+            tk.Label(preview, text=item.name, bg=BG, fg=TEXT, font=self.f_h2, wraplength=wrap,
+                     justify="left").pack(anchor="w")
+            tk.Label(preview, text="%s   ·   %s" % (item.mtime.strftime("%d/%m/%Y %H:%M"),
+                     i18n.t("preview_files", n=item.files, size=backup.fmt_size(item.size))),
+                     bg=BG, fg=MUTED, font=self.f_small).pack(anchor="w", pady=(2, 8))
+            if item.error:
+                tk.Label(preview, text=i18n.t("err_read_backup", err=item.error), bg=BG, fg="#f85149",
+                         font=self.f_small, wraplength=wrap, justify="left").pack(anchor="w")
+                return
+            names = ", ".join(item.profiles)
+            tk.Label(preview, text=i18n.t("preview_profile", names=names) if names
+                     else i18n.t("preview_noprofiles"), bg=BG, fg=TEXT, font=self.f_small,
+                     wraplength=wrap, justify="left").pack(anchor="w", pady=(0, 8))
+            for game in self.games:
+                tk.Label(preview, text=i18n.t(
+                    "preview_game", name=game.name, a=item.unlock_count(game.folder, game.title_id),
+                    b=len(game.entries), time=fmt_duration(item.play.get(game.key, 0)),
+                    last=fmt_unix_local(item.last.get(game.key, 0)) or i18n.t("never_launched")),
+                    bg=BG, fg=TEXT, font=self.f_small, wraplength=wrap,
+                    justify="left").pack(anchor="w", pady=(0, 2))
+
+        listbox.bind("<<ListboxSelect>>", show)
+        if items:
+            listbox.selection_set(0)
+        show()
+
+        bottom = tk.Frame(dlg, bg=BG)
+        bottom.pack(fill="x", pady=(12, 0))
+
+        if restore:
+            keep = tk.BooleanVar(value=True)
+            tk.Checkbutton(bottom, text=i18n.t("check_current"), variable=keep, bg=BG, fg=TEXT,
+                           selectcolor=PANEL, activebackground=BG, activeforeground=TEXT,
+                           font=self.f_small, bd=0, highlightthickness=0,
+                           cursor="hand2").pack(side="left")
+
+            def on_restore():
+                sel = listbox.curselection()
+                if not items or not sel:
+                    self.status.config(text=i18n.t("err_no_backup"))
+                    return
+                item = items[sel[0]]
+                asked = i18n.t("confirm_restore", root=self.root_dir, name=item.name)
+                if not self._confirm(asked):
+                    return
+                try:
+                    if keep.get():
+                        backup.create(self.root_dir, folder / backup.default_name(), only)
+                    files = backup.restore(self.root_dir, item.path, only)
+                except Exception as exc:  # zip abîmé, fichier verrouillé...
+                    self._info(i18n.t("dlg_restore"), i18n.t("err_restore", err=exc))
+                    return
+                if not files:
+                    self._info(i18n.t("dlg_restore"), i18n.t("err_no_profile_files"))
+                    return
+                dlg.destroy()
+                text = i18n.t("restore_done", files=files, name=item.name)
+                self.status.config(text=text)
+                self._info(i18n.t("dlg_restore"), text)
+                self.reload()
+
+            self._dialog_button(bottom, "btn_restore", on_restore, ACCENT_DARK,
+                                "#ffffff").pack(side="right", padx=(8, 0))
+        self._dialog_button(bottom, "btn_close", dlg.destroy).pack(side="right")
+
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        self._center(dlg)
+
     # -- données
     def reload(self):
         self.ini = CogBoxIni(self.root_dir / INI_NAME)
@@ -743,7 +985,7 @@ class App:
             found = next((g for g in self.games if g.folder == self.game.folder), None)
             if found:
                 self.game = found
-                self.show_game(found)
+                self.show_game(found, self.tab)
                 return
         self.show_games()
 
@@ -763,6 +1005,7 @@ class App:
     def show_games(self):
         tk = self.tk
         self.screen = "games"
+        self.tab = "achievements"
         self.game = None
         self._clear_body()
 
@@ -868,11 +1111,12 @@ class App:
         return canvas_img
 
     # -- écran 2 : un jeu
-    def show_game(self, game):
+    def show_game(self, game, tab=None):
         tk = self.tk
         self.screen = "game"
         self.game = game
-        self.query = ""
+        if tab is not None:
+            self.tab = tab
         self._clear_body()
 
         top = tk.Frame(self.body, bg=BG)
@@ -881,16 +1125,43 @@ class App:
                   relief="flat", padx=12, pady=4, cursor="hand2", activebackground=CARD_SEL,
                   activeforeground=TEXT, bd=0).pack(side="left")
 
+        a, b, gp, gp_total = game.totals()
         info = tk.Frame(top, bg=BG)
         info.pack(side="left", padx=(16, 0))
         tk.Label(info, text=game.name, bg=BG, fg=TEXT, font=self.f_h1).pack(anchor="w")
-        self.game_sub = tk.Label(info, text="", bg=BG, fg=MUTED, font=self.f_small)
+        self.game_sub = tk.Label(info, text=i18n.t("game_sub", a=a, b=b, gp=gp, gpt=gp_total,
+                                                   title_id=game.title_id),
+                                 bg=BG, fg=MUTED, font=self.f_small)
         self.game_sub.pack(anchor="w")
 
         self._stats_strip(game)
 
+        # onglets : succès, puis données de jeu de chaque profil
+        tabs = tk.Frame(self.body, bg=BG)
+        tabs.pack(fill="x")
+        self.tab_buttons = {}
+        for key in ("achievements", "saves"):
+            button = tk.Button(tabs, text=i18n.t("tab_" + key),
+                               command=lambda k=key: self.show_game(self.game, k), bg=PANEL, fg=MUTED,
+                               font=self.f_body, relief="flat", padx=14, pady=4, cursor="hand2",
+                               activebackground=CARD_SEL, activeforeground=TEXT, bd=0)
+            button.pack(side="left", padx=(0, 6))
+            self.tab_buttons[key] = button
+        self.tab_buttons[self.tab].config(bg=CARD_SEL, fg=TEXT)
+
+        self.tab_body = tk.Frame(self.body, bg=BG)
+        self.tab_body.pack(fill="both", expand=True, pady=(8, 0))
+        if self.tab == "saves":
+            self._saves_tab(game)
+        else:
+            self._achievements_tab(game)
+
+    def _achievements_tab(self, game):
+        tk = self.tk
+        self.query = ""
+
         # barre d'outils
-        bar = tk.Frame(self.body, bg=BG)
+        bar = tk.Frame(self.tab_body, bg=BG)
         bar.pack(fill="x", pady=(4, 10))
         self.search_var = tk.StringVar()
         entry = tk.Entry(bar, textvariable=self.search_var, bg=PANEL, fg=TEXT, insertbackground=TEXT,
@@ -911,8 +1182,14 @@ class App:
         self.count_label = tk.Label(bar, text="", bg=BG, fg=MUTED, font=self.f_body)
         self.count_label.pack(side="right")
 
-        # liste défilante
-        wrap = tk.Frame(self.body, bg=BG)
+        self._scroll_area(self.tab_body)
+        self.refresh_rows()
+        self._update_filter_buttons()
+
+    def _scroll_area(self, parent):
+        """Zone défilante des deux onglets : self.canvas (vue) et self.inner (contenu)."""
+        tk = self.tk
+        wrap = tk.Frame(parent, bg=BG)
         wrap.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0, bd=0)
         scroll = tk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
@@ -924,9 +1201,87 @@ class App:
         self.inner.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.inner_id, width=e.width))
         self.canvas.bind_all("<MouseWheel>", self._on_wheel)
+        return self.inner
 
-        self.refresh_rows()
-        self._update_filter_buttons()
+    # -- onglet « données de jeu » : un dossier de sauvegarde par profil
+    def _saves_tab(self, game):
+        self._scroll_area(self.tab_body)
+        self.refresh_saves()
+
+    @staticmethod
+    def _profile_number(user_dir):
+        name = Path(user_dir).name.lower()
+        return 1 if name == "user" else int(name[6:])
+
+    def refresh_saves(self):
+        game = self.game
+        if game is None or self.tab != "saves":
+            return
+        for child in self.inner.winfo_children():
+            child.destroy()
+        current = game.user_dir
+        dirs = list(game.user_dirs)
+        if current not in dirs:
+            dirs.append(current)
+        for user_dir in sorted(dirs, key=self._profile_number):
+            self._profile_row(self.inner, game, user_dir, user_dir == current)
+        self.status.config(text=i18n.t("status_saves", path=self.root_dir / game.folder))
+        self.canvas.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _profile_row(self, parent, game, user_dir, is_current):
+        tk = self.tk
+        number = self._profile_number(user_dir)
+        only = "%s/%s" % (game.folder, user_dir.name)
+        files, size, when = backup.folder_summary(self.root_dir, only)
+        name = backup.profile_name(self.root_dir, number)
+        try:
+            unlocks = len(parse_unlocks((user_dir / "achievements" / (game.title_id + ".toml"))
+                                        .read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            unlocks = 0
+
+        card = tk.Frame(parent, bg=CARD, padx=14, pady=12)
+        card.pack(fill="x", pady=(0, 6))
+        head = tk.Frame(card, bg=CARD)
+        head.pack(fill="x")
+        title = i18n.t("profile_title", n=number) + ("  ·  " + name if name else "")
+        tk.Label(head, text=title, bg=CARD, fg=TEXT, font=self.f_h2).pack(side="left")
+        if is_current:
+            tk.Label(head, text=i18n.t("profile_current"), bg=CARD, fg=ACCENT,
+                     font=self.f_small).pack(side="left", padx=(10, 0))
+        tk.Label(card, text=str(user_dir), bg=CARD, fg=MUTED, font=self.f_small).pack(anchor="w", pady=(2, 0))
+        stats = i18n.t("profile_stats", files=files, size=backup.fmt_size(size),
+                       when=when.strftime("%d/%m/%Y %H:%M") if when else i18n.t("never_launched"))
+        stats += "   ·   " + i18n.t("profile_ach", a=unlocks)
+        tk.Label(card, text=stats, bg=CARD, fg=MUTED, font=self.f_small).pack(anchor="w", pady=(3, 8))
+
+        buttons = tk.Frame(card, bg=CARD)
+        buttons.pack(anchor="w")
+        tag = backup.profile_tag(game.folder, user_dir)
+        self._dialog_button(buttons, "btn_backup", lambda: self._backup_dialog(only, tag)).pack(side="left", padx=(0, 6))
+        self._dialog_button(buttons, "btn_restore",
+                            lambda: self._backups_dialog(True, only)).pack(side="left", padx=(0, 6))
+        self._dialog_button(buttons, "btn_reset_profile",
+                            lambda: self._reset_profile(game, user_dir, only, number, name)).pack(side="left")
+
+    def _reset_profile(self, game, user_dir, only, number, name):
+        """Vide un profil après une sauvegarde automatique de ses fichiers."""
+        asked = i18n.t("confirm_reset_profile", n=number, name=name or str(user_dir), game=game.name)
+        if not self._confirm(asked):
+            return
+        tag = backup.profile_tag(game.folder, user_dir)
+        try:
+            zip_path = backup.backups_dir(self.root_dir) / backup.default_name(tag + "-before-reset")
+            backup.create(self.root_dir, zip_path, only)
+            files = backup.reset(self.root_dir, only)
+        except Exception as exc:  # fichier verrouillé par COGBox...
+            self._info(i18n.t("dlg_reset"), i18n.t("err_reset", err=exc))
+            return
+        text = i18n.t("reset_done", files=files, n=number, game=game.name, name=zip_path.name)
+        self.status.config(text=text)
+        self._info(i18n.t("dlg_reset"), text)
+        self.reload()
 
     def _stats_strip(self, game):
         """Temps de jeu et dernier lancement de COGBox (CogBox.ini), éditables."""
@@ -996,9 +1351,16 @@ class App:
             else:
                 b.config(bg=PANEL, fg=MUTED)
 
+    def refresh_tab(self):
+        """Redessine l'onglet visible après une modification."""
+        if self.tab == "saves":
+            self.refresh_saves()
+        else:
+            self.refresh_rows()
+
     def refresh_rows(self):
         game = self.game
-        if game is None:
+        if game is None or self.tab != "achievements":
             return
         tk = self.tk
         keep = self.canvas.yview()[0]
@@ -1076,17 +1438,26 @@ class App:
 
     # -- actions
     def _toggle(self, entry, unlocked):
+        name = entry.label or i18n.t("row_noname")
+        asked = i18n.t("confirm_unlock", name=name) if unlocked else i18n.t("confirm_lock", name=name)
+        if not self._confirm(asked):
+            return
         self.game.set_unlocked(entry, unlocked)
         self.game.save()
-        self.refresh_rows()
+        self.refresh_tab()
 
     def _edit_date(self, entry):
         current = filetime_to_local(self.game.unlocks.get(entry.id, 0)) or datetime.now()
 
         def apply(when):
+            asked = i18n.t("confirm_date", name=entry.label or i18n.t("row_noname"),
+                           when=when.strftime("%d/%m/%Y %H:%M:%S"))
+            if not self._confirm(asked):
+                return False
             self.game.set_unlocked(entry, True, local_to_filetime(when))
             self.game.save()
-            self.refresh_rows()
+            self.refresh_tab()
+            return True
 
         self._moment_dialog(i18n.t("dlg_unlock_date"), entry.label, i18n.t("dlg_local_time"),
                             current, apply, None)
@@ -1130,11 +1501,15 @@ class App:
         buttons.pack(pady=(12, 0))
 
         def apply_seconds(seconds):
+            asked = (i18n.t("confirm_reset_playtime", name=game.name) if seconds == 0
+                     else i18n.t("confirm_playtime", time=fmt_duration(seconds), name=game.name))
+            if not self._confirm(asked):
+                return
             if not game.set_play_seconds(seconds):
                 error.config(text=i18n.t("err_write", err=self.ini.error or ""))
                 return
             dlg.destroy()
-            self.refresh_rows()
+            self.refresh_tab()
 
         def on_apply():
             try:
@@ -1166,20 +1541,28 @@ class App:
         when = datetime.fromtimestamp(self.game.last_played) if current else datetime.now()
 
         def apply(dt):
+            asked = i18n.t("confirm_last", name=self.game.name,
+                           when=dt.strftime("%d/%m/%Y %H:%M:%S"))
+            if not self._confirm(asked):
+                return False
             if not self.game.set_last_played(int(dt.timestamp())):
                 self.status.config(text=i18n.t("err_write", err=self.ini.error or ""))
-                return
+                return False
             self.refresh_stats()
+            return True
 
         self._moment_dialog(i18n.t("dlg_last"), self.game.name,
                             i18n.t("dlg_source", section=INI_LAST_SECTION, name=self.game.key),
                             when, apply, self._clear_last_played)
 
     def _clear_last_played(self):
+        if not self._confirm(i18n.t("confirm_clear_last", name=self.game.name)):
+            return False
         if self.game.set_last_played(0):
             self.refresh_stats()
-        else:
-            self.status.config(text=i18n.t("err_write", err=self.ini.error or ""))
+            return True
+        self.status.config(text=i18n.t("err_write", err=self.ini.error or ""))
+        return False
 
     def _moment_dialog(self, title, subject, subtitle, current, on_apply, on_clear):
         """Dialogue date + heure (local), avec « Maintenant » et un effacement optionnel."""
@@ -1216,7 +1599,8 @@ class App:
         buttons.pack(pady=(12, 0))
 
         def apply(when):
-            on_apply(when)
+            if on_apply(when) is False:
+                return
             dlg.destroy()
 
         def on_now():
@@ -1242,7 +1626,8 @@ class App:
                   activeforeground="#ffffff", bd=0).pack(side="left", padx=(0, 8))
         if on_clear is not None:
             def clear():
-                on_clear()
+                if on_clear() is False:
+                    return
                 dlg.destroy()
 
             tk.Button(buttons, text=i18n.t("btn_clear"), command=clear, bg=PANEL, fg=TEXT, font=self.f_body,
@@ -1352,6 +1737,50 @@ def selftest(root_dir):
         if not all(checks.values()) or not saved:
             print("  written content:\n%s" % ini2.read_text(encoding="utf-8", errors="replace"))
             ok = False
+    # sauvegardes : zip des fichiers COGBox, aperçu de son contenu, restauration
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "src"
+        (src / "Gears3" / "user" / "achievements").mkdir(parents=True)
+        (src / "Gears3" / "user-p2" / "achievements").mkdir(parents=True)
+        (src / "profiles" / "1").mkdir(parents=True)
+        (src / "Gears3" / "user" / "0000000000000000").mkdir()
+        (src / "Gears3" / "user" / "0000000000000000" / "dlc.bin").write_bytes(b"0" * 4096)
+        (src / INI_NAME).write_text("[PlayTime]\r\ngears3 = 3600\r\n\r\n[LastPlayed]\r\ngears3 = 1795438448\r\n",
+                                    encoding="utf-8", newline="")
+        (src / "settings.ini").write_text("[General]\r\nGame=2\r\n", encoding="utf-8", newline="")
+        (src / "profiles" / "1" / "identity.json").write_text(
+            '{"display_name": "Myth", "discriminator": "2722"}', encoding="utf-8")
+        unlocked = "# Achievement unlock state\r\n\r\n[unlocked.%d]\r\nfiletime = %d\r\n"
+        (src / "Gears3" / "user" / "achievements" / "4D5308AB.toml").write_text(
+            unlocked % (1, 1) + "\r\n" + unlocked % (2, 2), encoding="utf-8", newline="")
+        (src / "Gears3" / "user-p2" / "achievements" / "4D5308AB.toml").write_text(
+            unlocked % (3, 3), encoding="utf-8", newline="")
+
+        zpath = backup.backups_dir(src) / backup.default_name()
+        files, size = backup.create(src, zpath)
+        info = backup.Backup(zpath).load()
+        dest = Path(td) / "dest"
+        (dest / "Gears3").mkdir(parents=True)
+        written = backup.restore(dest, zpath)
+        profile = backup.folder_summary(dest, "Gears3/user-p2")
+        checks = {
+            "DLC left out": files == 5,
+            "preview finds the play time": info.play.get("gears3") == 3600,
+            "preview counts unlocks of both profiles": info.unlock_count("Gears3", "4D5308AB") == 3,
+            "preview reads the profile name": info.profiles == ["Myth #2722"],
+            "restore writes every file": written == files,
+            "profile summary sees its save": profile[0] == 1,
+            "restored file has its content": "[unlocked.3]" in (dest / "Gears3" / "user-p2" / "achievements" /
+                                                                 "4D5308AB.toml").read_text(encoding="utf-8"),
+        }
+        checks["reset empties the profile"] = (backup.reset(dest, "Gears3/user-p2") == 1
+                                               and not (dest / "Gears3" / "user-p2" / "achievements").exists())
+        print("backup round trip: %s%s" % ("OK" if all(checks.values()) else "FAILED",
+                                          "" if all(checks.values()) else
+                                          "  " + ", ".join(k for k, v in checks.items() if not v)))
+        if not all(checks.values()):
+            ok = False
+
     gaps = i18n.missing()
     print("interface language: %s" % i18n.code())
     if gaps:

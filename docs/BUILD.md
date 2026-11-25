@@ -1,6 +1,6 @@
 # Build
 
-L'application est un seul fichier Python (`achievements_manager.py`) empaqueté par
+L'application est du Python (`achievements_manager.py`, `i18n.py` pour les textes, `backup.py` pour les zips) empaqueté par
 [PyInstaller](https://pyinstaller.org) en exécutable autonome. Toute sortie va sous
 `build/output/<platform>/` (le dossier `build/` est ignoré par git) :
 
