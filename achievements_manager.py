@@ -819,7 +819,7 @@ class App:
         dlg.resizable(False, False)
         wrap = int(430 * self.scale)
 
-        tk.Label(dlg, text=i18n.t("backup_intro"), bg=BG, fg=TEXT, font=self.f_h2,
+        tk.Label(dlg, text=i18n.t("backup_intro_profile" if only else "backup_intro"), bg=BG, fg=TEXT, font=self.f_h2,
                  wraplength=wrap, justify="left").pack(anchor="w")
         tk.Label(dlg, text=i18n.t("backup_where", path=folder), bg=BG, fg=MUTED, font=self.f_small,
                  wraplength=wrap, justify="left").pack(anchor="w", pady=(2, 12))
@@ -875,7 +875,7 @@ class App:
         dlg.geometry("%dx%d" % (int(820 * self.scale), int(440 * self.scale)))
         dlg.minsize(int(700 * self.scale), int(360 * self.scale))
 
-        intro = (i18n.t("restore_intro", root=self.root_dir) if restore
+        intro = (i18n.t("restore_intro_profile" if only else "restore_intro", root=self.root_dir) if restore
                  else i18n.t("backups_intro", path=folder))
         tk.Label(dlg, text=intro, bg=BG, fg=TEXT, font=self.f_body,
                  wraplength=int(760 * self.scale), justify="left").pack(anchor="w", pady=(0, 10))
@@ -1657,6 +1657,22 @@ class App:
 
 # ---------------------------------------------------------------- hors interface
 
+def make_junction(link, target):
+    """Jonction (Windows) ou lien de dossier : True si le lien existe ensuite."""
+    link, target = Path(link), Path(target)
+    try:
+        if os.name == "nt":
+            import subprocess
+
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        else:
+            os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        pass
+    return link.is_dir()
+
+
 def selftest(root_dir):
     print("COGBox folder: %s" % root_dir)
     print("  achievements/ %s" % ("present" if (root_dir / "achievements").is_dir() else "MISSING"))
@@ -1775,6 +1791,23 @@ def selftest(root_dir):
         }
         checks["reset empties the profile"] = (backup.reset(dest, "Gears3/user-p2") == 1
                                                and not (dest / "Gears3" / "user-p2" / "achievements").exists())
+
+        # reset d'un profil : ni la jonction du DLC partagé ni les dossiers de contenu ne sont traversés
+        user = dest / "Gears3" / "user"
+        (user / "ini-edits").mkdir(parents=True, exist_ok=True)
+        (user / "ini-edits" / "Coalesced.ini").write_bytes(b"x")
+        dlc = Path(td) / "dlc"
+        (dlc / "00000002").mkdir(parents=True)
+        (dlc / "00000002" / "big.pak").write_bytes(b"x" * 4096)
+        (dlc / "empty").mkdir()
+        junction = user / "dlc-link"
+        linked = make_junction(junction, dlc)
+        backup.reset(dest, "Gears3/user")
+        checks["reset crosses no junction"] = (not linked or (junction.is_dir()
+                                                             and (dlc / "empty").is_dir()
+                                                             and (dlc / "00000002" / "big.pak").is_file()))
+        checks["reset leaves excluded folders alone"] = (user / "ini-edits" / "Coalesced.ini").is_file()
+        checks["reset clears the profile's saves"] = not (user / "achievements").exists()
         print("backup round trip: %s%s" % ("OK" if all(checks.values()) else "FAILED",
                                           "" if all(checks.values()) else
                                           "  " + ", ".join(k for k, v in checks.items() if not v)))

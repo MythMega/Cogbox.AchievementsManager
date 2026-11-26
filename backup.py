@@ -230,18 +230,39 @@ def restore(root, zip_path, only=None):
     return written
 
 
+def _prune(folder):
+    """Enlève les sous-dossiers vides, sans jamais suivre un lien/jonction ni entrer dans un dossier exclu.
+
+    ``rglob`` traverserait la jonction du DLC partagé et viderait des dossiers du contenu installé :
+    ici on ne descend que dans de vrais dossiers, et les noms de SKIP_DIRS sont laissés tels quels.
+    """
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        return
+    for entry in entries:
+        if _is_link(entry) or not entry.is_dir() or entry.name.lower() in SKIP_DIRS:
+            continue
+        path = Path(entry.path)
+        _prune(path)
+        try:
+            path.rmdir()  # seulement s'il est vide
+        except OSError:
+            pass
+
+
 def reset(root, only):
-    """Efface les fichiers sauvegardés d'un dossier (DLC et liens intacts) ; renvoie le nombre."""
+    """Efface les fichiers sauvegardés d'un dossier (DLC, liens et dossiers exclus intacts).
+
+    Renvoie le nombre de fichiers supprimés ; le dossier du profil lui-même reste.
+    """
     root = Path(root)
-    files = files_to_back_up(root, only)
+    files = files_to_back_up(root, only)  # ne traverse déjà ni les liens ni les dossiers exclus
     for path, _arc in files:
         path.unlink()
     folder = root / only
-    for path in sorted((p for p in folder.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
-        try:
-            path.rmdir()  # seulement s'il est vide : le DLC et les jonctions restent
-        except OSError:
-            pass
+    if folder.is_dir():
+        _prune(folder)
     return len(files)
 
 
