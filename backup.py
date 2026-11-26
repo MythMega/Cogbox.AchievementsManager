@@ -54,8 +54,15 @@ def profile_tag(game, user_dir):
     return ("%s-%s" % (game, Path(user_dir).name)).lower()
 
 
-def backups_dir(root):
-    return Path(root) / BACKUP_DIR
+def app_data_dir():
+    """%APPDATA%\\JMD\\AchievementsManager (réglages et sauvegardes de l'outil)."""
+    base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    return Path(base) / "JMD" / "AchievementsManager"
+
+
+def backups_dir(root=None):
+    """Dossier des zips : dans le %APPDATA% de l'utilisateur (``root`` n'est plus utilisé)."""
+    return app_data_dir() / BACKUP_DIR
 
 
 def check_name(name):

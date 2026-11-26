@@ -565,7 +565,7 @@ def _script_or_exe_dir():
 
 
 def config_path():
-    return _script_or_exe_dir() / "AppData" / "Roaming" / "JMD" / "AchievementsManager" / "settings.ini"
+    return backup.app_data_dir() / "settings.ini"
 
 
 def save_remembered_root(root):
@@ -1772,7 +1772,7 @@ def selftest(root_dir):
         (src / "Gears3" / "user-p2" / "achievements" / "4D5308AB.toml").write_text(
             unlocked % (3, 3), encoding="utf-8", newline="")
 
-        zpath = backup.backups_dir(src) / backup.default_name()
+        zpath = Path(td) / "backups" / backup.default_name()
         files, size = backup.create(src, zpath)
         info = backup.Backup(zpath).load()
         dest = Path(td) / "dest"
